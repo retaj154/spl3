@@ -1,4 +1,4 @@
-// File: bgu/spl/net/impl/stomp/StompMessagingProtocolImpl.java
+
 package bgu.spl.net.impl.stomp;
 
 import bgu.spl.net.api.StompMessagingProtocol;
@@ -26,9 +26,9 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     }
 
     @Override
-    public void process(String message) {
+    public String process(String message) {
         String[] lines = message.split("\n");
-        if (lines.length == 0) return;
+        if (lines.length == 0) return null;
 
         String command = lines[0].trim();
         Map<String, String> headers = parseHeaders(lines);
@@ -36,7 +36,7 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
 
         if (currentUser == null && !command.equals("CONNECT")) {
             sendError("Not logged in", "You must log in first");
-            return;
+            return null;
         }
 
         switch (command) {
@@ -58,6 +58,7 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
             default:
                 sendError("Unknown Command", "Command not recognized");
         }
+        return null;
     }
 
     @Override

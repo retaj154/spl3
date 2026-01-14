@@ -2,6 +2,9 @@ package bgu.spl.net.srv;
 
 import bgu.spl.net.api.MessageEncoderDecoder;
 import bgu.spl.net.api.MessagingProtocol;
+import bgu.spl.net.api.StompMessagingProtocol;
+import bgu.spl.net.impl.stomp.ConnectionsImpl;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -16,37 +19,44 @@ public class BlockingConnectionHandler<T> implements Runnable, ConnectionHandler
     private BufferedOutputStream out;
     private volatile boolean connected = true;
 
-    public BlockingConnectionHandler(Socket sock, MessageEncoderDecoder<T> reader, MessagingProtocol<T> protocol) {
+    private final int connectionId;
+    private final Connections<T> connections;
+
+
+    public BlockingConnectionHandler(Socket sock, MessageEncoderDecoder<T> reader, MessagingProtocol<T> protocol, int connectionId, Connections<T> connections) {
         this.sock = sock;
         this.encdec = reader;
         this.protocol = protocol;
+        this.connectionId = connectionId;
+        this.connections = connections;
     }
 
     @Override
     public void run() {
-        try (Socket sock = this.sock) { //just for automatic closing
-            int read;
-
+        try (Socket sock = this.sock) { 
+            int read = -1; 
             in = new BufferedInputStream(sock.getInputStream());
             out = new BufferedOutputStream(sock.getOutputStream());
 
+            if (protocol instanceof StompMessagingProtocol) {
+                ((StompMessagingProtocol<T>) protocol).start(connectionId, connections);
+            }
+
+            if (connections instanceof ConnectionsImpl) {
+                ((ConnectionsImpl<T>) connections).addConnection(connectionId, this);
+            }
             while (!protocol.shouldTerminate() && connected && (read = in.read()) >= 0) {
                 T nextMessage = encdec.decodeNextByte((byte) read);
                 if (nextMessage != null) {
-                    T response = protocol.process(nextMessage);
-                    if (response != null) {
-                        out.write(encdec.encode(response));
-                        out.flush();
-                    }
+                    protocol.process(nextMessage);
                 }
             }
+            connections.disconnect(connectionId);
 
         } catch (IOException ex) {
             ex.printStackTrace();
         }
-
     }
-
     @Override
     public void close() throws IOException {
         connected = false;
@@ -55,6 +65,19 @@ public class BlockingConnectionHandler<T> implements Runnable, ConnectionHandler
 
     @Override
     public void send(T msg) {
-        //IMPLEMENT IF NEEDED
+        try {
+            if(msg!=null){
+                synchronized(out){
+                    out.write(encdec.encode(msg));
+                    out.flush();
+                }
+            }
+        }
+        
+        catch(IOException e){
+            e.printStackTrace();
+
+        }
     }
+    
 }

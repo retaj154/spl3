@@ -13,7 +13,6 @@ public class StompEncoderDecoder implements MessageEncoderDecoder<String> {
 
     @Override
     public String decodeNextByte(byte nextByte) {
-        // STOMP frame ends with NULL (\u0000) => byte value 0
         if (nextByte == '\u0000') {
             return popString();
         }
