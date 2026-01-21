@@ -36,7 +36,6 @@ public class ConnectionsImpl<T> implements Connections<T> {
     public void disconnect(int connectionId) {
         activeConnections.remove(connectionId);
 
-        // remove from all channels to avoid stale subscribers
         for (ConcurrentLinkedQueue<Integer> q : channelSubscribers.values()) {
             q.remove(connectionId);
         }

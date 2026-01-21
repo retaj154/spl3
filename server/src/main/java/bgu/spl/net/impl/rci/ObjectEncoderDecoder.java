@@ -18,9 +18,9 @@ public class ObjectEncoderDecoder implements MessageEncoderDecoder<Serializable>
 
     @Override
     public Serializable decodeNextByte(byte nextByte) {
-        if (objectBytes == null) { //indicates that we are still reading the length
+        if (objectBytes == null) { 
             lengthBuffer.put(nextByte);
-            if (!lengthBuffer.hasRemaining()) { //we read 4 bytes and therefore can take the length
+            if (!lengthBuffer.hasRemaining()) { 
                 lengthBuffer.flip();
                 objectBytes = new byte[lengthBuffer.getInt()];
                 objectBytesIndex = 0;

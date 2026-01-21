@@ -19,7 +19,7 @@ bool ConnectionHandler::connect() {
 	std::cout << "Starting connect to "
 	          << host_ << ":" << port_ << std::endl;
 	try {
-		tcp::endpoint endpoint(boost::asio::ip::address::from_string(host_), port_); // the server endpoint
+		tcp::endpoint endpoint(boost::asio::ip::address::from_string(host_), port_); 
 		boost::system::error_code error;
 		socket_.connect(endpoint, error);
 		if (error)
@@ -75,8 +75,7 @@ bool ConnectionHandler::sendLine(std::string &line) {
 
 bool ConnectionHandler::getFrameAscii(std::string &frame, char delimiter) {
 	char ch;
-	// Stop when we encounter the delimiter character.
-	// Notice that the delimiter is not appended to the frame string.
+	
 	try {
 		do {
 			if (!getBytes(&ch, 1)) {
@@ -98,7 +97,6 @@ bool ConnectionHandler::sendFrameAscii(const std::string &frame, char delimiter)
 	return sendBytes(&delimiter, 1);
 }
 
-// Close down the connection properly.
 void ConnectionHandler::close() {
 	try {
 		socket_.close();

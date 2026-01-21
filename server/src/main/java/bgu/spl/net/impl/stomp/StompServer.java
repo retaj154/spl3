@@ -5,7 +5,6 @@ import bgu.spl.net.srv.Server;
 public class StompServer {
 
     public static void main(String[] args) {
-        // args[0] = port, args[1] = server type (tpc/reactor)
 
         if (args.length < 2) {
             System.out.println("Usage: StompServer <port> <server_type>");

@@ -1,4 +1,3 @@
-
 package bgu.spl.net.impl.stomp;
 
 import bgu.spl.net.api.StompMessagingProtocol;
@@ -9,6 +8,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class StompMessagingProtocolImpl implements StompMessagingProtocol<String> {
 
@@ -16,8 +16,12 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     private Connections<String> connections;
     private boolean shouldTerminate = false;
 
+    private static final AtomicInteger messageIdCounter = new AtomicInteger(0);
+
     private static final ConcurrentHashMap<String, User> usersMap = new ConcurrentHashMap<>();
     private User currentUser = null;
+
+    private String lastFrame = "";
 
     @Override
     public void start(int connectionId, Connections<String> connections) {
@@ -27,6 +31,10 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
 
     @Override
     public String process(String message) {
+        if (message == null) return null;
+
+        lastFrame = message; 
+
         String[] lines = message.split("\n");
         if (lines.length == 0) return null;
 
@@ -35,29 +43,53 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         String body = extractBody(message);
 
         if (currentUser == null && !command.equals("CONNECT")) {
-            sendError("Not logged in", "You must log in first");
+            sendError(
+                    "Not logged in",
+                    headers.get("receipt"),
+                    "You must CONNECT first",
+                    lastFrame
+            );
             return null;
         }
 
         switch (command) {
             case "CONNECT":
+                if (currentUser != null && currentUser.isLoggedIn()) {
+                    sendError("malformed frame received",
+                            headers.get("receipt"),
+                            "Already connected. CONNECT is allowed only once per connection.",
+                            lastFrame);
+                    return null;
+                }
                 handleConnect(headers);
                 break;
+
             case "SEND":
                 handleSend(headers, body);
                 break;
+
             case "SUBSCRIBE":
                 handleSubscribe(headers);
                 break;
+
             case "UNSUBSCRIBE":
                 handleUnsubscribe(headers);
                 break;
+
             case "DISCONNECT":
                 handleDisconnect(headers);
                 break;
+
             default:
-                sendError("Unknown Command", "Command not recognized");
+                sendError(
+                        "malformed frame received",
+                        headers.get("receipt"),
+                        "Command not recognized",
+                        lastFrame
+                );
+                break;
         }
+
         return null;
     }
 
@@ -66,40 +98,55 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         return shouldTerminate;
     }
 
+
     private void handleConnect(Map<String, String> headers) {
         String login = headers.get("login");
         String passcode = headers.get("passcode");
-
+        String receipt = headers.get("receipt");
+        
         if (login == null || passcode == null) {
-            sendError("Malformed Frame", "Missing login or passcode");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Missing login or passcode header",
+                    lastFrame
+            );
             return;
         }
 
         synchronized (usersMap) {
-            if (!usersMap.containsKey(login)) {
-                User newUser = new User(connectionId, login, passcode);
-                newUser.login();
-                usersMap.put(login, newUser);
-                currentUser = newUser;
-                sendConnected();
+            User user = usersMap.get(login);
+
+            if (user == null) {
+                user = new User(connectionId, login, passcode);
+                usersMap.put(login, user);
             } else {
-                User user = usersMap.get(login);
-
                 if (!user.password.equals(passcode)) {
-                    sendError("Wrong password", "Password does not match");
+                    sendError(
+                            "malformed frame received",
+                            receipt,
+                            "Wrong password",
+                            lastFrame
+                    );
                     return;
                 }
-
                 if (user.isLoggedIn()) {
-                    sendError("User already logged in", "User is already logged in");
+                    sendError(
+                            "malformed frame received",
+                            receipt,
+                            "User already logged in",
+                            lastFrame
+                    );
                     return;
                 }
-
-                user.setConnectionId(connectionId);
-                user.login();
-                currentUser = user;
-                sendConnected();
             }
+
+            user.setConnectionId(connectionId);
+            user.login();
+            currentUser = user;
+
+            sendConnected();
+            if (receipt != null) sendReceipt(receipt);
         }
     }
 
@@ -109,7 +156,12 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         String receipt = headers.get("receipt");
 
         if (topic == null || subId == null) {
-            sendError("Malformed Frame", "Missing destination or id header");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Missing destination or id header",
+                    lastFrame
+            );
             return;
         }
 
@@ -118,7 +170,12 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         if (connections instanceof ConnectionsImpl) {
             ((ConnectionsImpl<String>) connections).subscribe(topic, connectionId);
         } else {
-            sendError("Server error", "Connections implementation mismatch");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Server connections implementation mismatch",
+                    lastFrame
+            );
             return;
         }
 
@@ -130,43 +187,73 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         String receipt = headers.get("receipt");
 
         if (subId == null) {
-            sendError("Malformed Frame", "Missing id header");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Missing id header",
+                    lastFrame
+            );
             return;
         }
 
         String topic = currentUser.getTopic(subId);
-        if (topic != null) {
-            currentUser.removeSubscription(subId);
-
-            if (connections instanceof ConnectionsImpl) {
-                ((ConnectionsImpl<String>) connections).unsubscribe(topic, connectionId);
-            }
-
-            if (receipt != null) sendReceipt(receipt);
+        if (topic == null) {
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Unknown subscription id",
+                    lastFrame
+            );
+            return;
         }
+
+        currentUser.removeSubscription(subId);
+
+        if (connections instanceof ConnectionsImpl) {
+            ((ConnectionsImpl<String>) connections).unsubscribe(topic, connectionId);
+        }
+
+        if (receipt != null) sendReceipt(receipt);
     }
 
     private void handleSend(Map<String, String> headers, String body) {
         String topic = headers.get("destination");
+        String receipt = headers.get("receipt");
+
         if (topic == null) {
-            sendError("Malformed Frame", "Missing destination");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Did not contain a destination header, which is REQUIRED for message propagation.",
+                    lastFrame
+            );
             return;
         }
 
-        // Per assignment: if not subscribed -> ERROR + disconnect
         if (currentUser.getSubscriptionId(topic) == null) {
-            sendError("Permission denied", "Not subscribed to topic");
+            sendError(
+                    "Permission denied",
+                    receipt,
+                    "Not subscribed to topic",
+                    lastFrame
+            );
             return;
         }
 
         if (!(connections instanceof ConnectionsImpl)) {
-            sendError("Server error", "Connections implementation mismatch");
+            sendError(
+                    "malformed frame received",
+                    receipt,
+                    "Server connections implementation mismatch",
+                    lastFrame
+            );
             return;
         }
 
         ConnectionsImpl<String> connImpl = (ConnectionsImpl<String>) connections;
         ConcurrentLinkedQueue<Integer> subscribers = connImpl.getSubscribers(topic);
 
+        int msgId = messageIdCounter.incrementAndGet();
         if (subscribers != null) {
             for (Integer targetConnId : subscribers) {
                 User targetUser = findUserByConnectionId(targetConnId);
@@ -175,12 +262,11 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
                 String targetSubId = targetUser.getSubscriptionId(topic);
                 if (targetSubId == null) continue;
 
-                String msgFrame = createMessageFrame(topic, targetSubId, body);
+                String msgFrame = createMessageFrame(topic, targetSubId, body,msgId);
                 connections.send(targetConnId, msgFrame);
             }
         }
 
-        String receipt = headers.get("receipt");
         if (receipt != null) sendReceipt(receipt);
     }
 
@@ -199,6 +285,7 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         connections.disconnect(connectionId);
     }
 
+
     private User findUserByConnectionId(int connId) {
         for (User u : usersMap.values()) {
             if (u.getConnectionId() == connId && u.isLoggedIn()) return u;
@@ -206,11 +293,10 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         return null;
     }
 
-    // IMPORTANT: no \u0000 here. EncoderDecoder adds it.
-    private String createMessageFrame(String topic, String subId, String body) {
+    private String createMessageFrame(String topic, String subId, String body, int msgId) {
         return "MESSAGE\n" +
                 "subscription:" + subId + "\n" +
-                "message-id:" + java.util.UUID.randomUUID() + "\n" +
+                "message-id:" + msgId + "\n" +
                 "destination:" + topic + "\n\n" +
                 body;
     }
@@ -223,8 +309,30 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         connections.send(connectionId, "RECEIPT\nreceipt-id:" + receiptId + "\n\n");
     }
 
-    private void sendError(String message, String desc) {
-        connections.send(connectionId, "ERROR\nmessage:" + message + "\n\n" + desc);
+    private void sendError(String shortMsg, String receiptId, String details, String originalFrame) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ERROR\n");
+
+        if (receiptId != null) {
+            sb.append("receipt-id: ").append(receiptId).append("\n");
+        }
+
+        sb.append("message: ").append(shortMsg).append("\n");
+        sb.append("\n"); 
+
+        if (originalFrame != null && !originalFrame.isEmpty()) {
+            sb.append("The message:\n");
+            sb.append("----\n");
+            sb.append(originalFrame).append("\n");
+            sb.append("----\n");
+        }
+
+        if (details != null && !details.isEmpty()) {
+            sb.append(details).append("\n");
+        }
+
+        connections.send(connectionId, sb.toString());
+
         shouldTerminate = true;
         connections.disconnect(connectionId);
     }

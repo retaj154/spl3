@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
+#include <fstream>
 #include "event.h"
 using namespace std;
 
@@ -15,6 +17,8 @@ private:
     int receiptIdCounter;      
     map<string, int> topicToSubId;
     std::map<std::string, std::map<std::string, std::vector<Event>>> game_reports;
+    int logoutReceiptId;
+
 public:
     StompProtocol();
 

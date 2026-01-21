@@ -6,6 +6,8 @@
 #include <iostream>
 #include <vector>
 #include <sstream>
+#include <chrono>
+
 
 using namespace std;
 
@@ -75,7 +77,12 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            string frame = "CONNECT\naccept-version:1.2\nhost:stomp.cs.bgu.ac.il\nlogin:" + username + "\npasscode:" + password + "\n\n";
+           string frame = "CONNECT\n"
+               "accept-version:1.2\n"
+               "host:" + host + "\n"
+               "login:" + username + "\n"
+               "passcode:" + password + "\n\n";
+
             connectionHandler.sendFrameAscii(frame, '\0'); 
 
             StompProtocol protocol;
@@ -91,8 +98,11 @@ int main(int argc, char *argv[]) {
                 stringstream userSS(userInput);
                 string userCmd;
                 userSS >> userCmd;
-                
-                if (userCmd == "report") {
+                if (userCmd == "login") {
+                        cout << "The client is already logged in, log out before trying again" << endl;
+                        continue;
+                }
+                else if  (userCmd == "report") {
                     string fileName;
                     userSS >> fileName;
                     try {
@@ -116,7 +126,7 @@ int main(int argc, char *argv[]) {
                     string frame = protocol.processInput(userInput, username);
                     connectionHandler.sendFrameAscii(frame, '\0'); 
                     while(!shouldTerminate) {
-                         this_thread::yield(); 
+                         this_thread::sleep_for(std::chrono::milliseconds(10)); 
                     }
                 } 
                 else {
@@ -128,6 +138,8 @@ int main(int argc, char *argv[]) {
             }
 
             t.join();
+            connectionHandler.close();
+
         } else {
             cout << "Please login first." << endl;
         }

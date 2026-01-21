@@ -5,7 +5,8 @@
 using namespace std;
 #include <fstream>
 
-StompProtocol::StompProtocol() : subscriptionIdCounter(0), receiptIdCounter(0), topicToSubId() {}
+StompProtocol::StompProtocol() : subscriptionIdCounter(0), receiptIdCounter(0), topicToSubId(), logoutReceiptId(-1) {}
+ 
 
 string StompProtocol::processInput(string line, string username) {
     stringstream ss(line);
@@ -13,20 +14,30 @@ string StompProtocol::processInput(string line, string username) {
     ss >> command; 
 
     if (command == "login") {
-        cout << "The client is already logged in, log out before trying again" << endl;
-        return ""; 
-    }
+    string hostPort, user, pass;
+    ss >> hostPort >> user >> pass;
+    if (hostPort.empty() || user.empty() || pass.empty()) return "";
+
+    return "CONNECT\n"
+           "accept-version:1.2\n"
+           "host:" + hostPort + "\n"
+           "login:" + user + "\n"
+           "passcode:" + pass + "\n"
+           "\n";
+}
+
     
     if (command == "join") {
         string destination;
         ss >> destination; 
+        destination="/"+destination;
         if (destination.empty()) return "";
         
         int id = subscriptionIdCounter++;
         topicToSubId[destination] = id;
 
         return "SUBSCRIBE\n"
-               "destination:/" + destination + "\n"
+               "destination:" + destination + "\n"
                "id:" + to_string(id) + "\n"
                "receipt:" + to_string(receiptIdCounter++) + "\n"
                "\n";
@@ -35,6 +46,7 @@ string StompProtocol::processInput(string line, string username) {
     if (command == "exit") {
         string destination;
         ss >> destination;
+        destination="/"+destination;
         if (destination.empty()) return "";
         
         if (topicToSubId.find(destination) == topicToSubId.end()) {
@@ -52,36 +64,42 @@ string StompProtocol::processInput(string line, string username) {
     }
     
     if (command == "add") {
-        string destination;
-        ss >> destination;
-        if (destination.empty()) return "";
-        
-        string body;
-        getline(ss, body); 
-        if (body.length() > 0 && body[0] == ' ') body.erase(0, 1);
+    string destination;
+    ss >> destination;
+    if (destination.empty()) return "";
 
-        return "SEND\n"
-               "destination:/" + destination + "\n"
-               "\n" + 
-               body + "\n";
-    }
+    string body;
+    getline(ss, body);
+    if (!body.empty() && body[0] == ' ') body.erase(0, 1);
+
+    int receipt = receiptIdCounter++;
+
+    return "SEND\n"
+           "destination:/" + destination + "\n"
+           "receipt:" + to_string(receipt) + "\n"
+           "\n" +
+           body + "\n";
+}
+
     
     if (command == "logout") {
-        return "DISCONNECT\n"
-               "receipt:77\n"
-               "\n";
-    }
+    logoutReceiptId = receiptIdCounter++;
+    return "DISCONNECT\n"
+           "receipt:" + to_string(logoutReceiptId) + "\n"
+           "\n";
+}
+
 
     return "";
 }
 
 bool StompProtocol::shouldTerminate(string response) {
-    if (response.find("RECEIPT") != string::npos && 
-        response.find("receipt-id:77") != string::npos) {
-        return true;
-    }
-    return false;
+    if (logoutReceiptId == -1) return false;
+    return response.find("RECEIPT") != string::npos &&
+           response.find("receipt-id:" + to_string(logoutReceiptId)) != string::npos;
 }
+
+
 std::string StompProtocol::createReportFrame(const Event& event, std::string username) {
     std::string body = "user: " + username + "\n";
     body += "team a: " + event.get_team_a_name() + "\n";
@@ -107,7 +125,9 @@ std::string StompProtocol::createReportFrame(const Event& event, std::string use
     body += "description:\n" + event.get_discription() + "\n";
 
     std::string destination = event.get_team_a_name() + "_" + event.get_team_b_name();
-    return "SEND\ndestination:/" + destination + "\n\n" + body;
+    return  "SEND\n"
+       "destination:/" + destination + "\n"
+       "\n" + body + "\n";
 }
 void StompProtocol::processMessage(string frame) {
     stringstream ss(frame);
@@ -156,13 +176,11 @@ void StompProtocol::saveSummary(string gameName, string user, string filePath) {
         return a.get_time() < b.get_time();
     });
 
-    // כותרת המשחק
     string displayGame = gameName;
     size_t underscore = displayGame.find('_');
     if (underscore != string::npos) displayGame.replace(underscore, 1, " vs ");
     outFile << displayGame << "\n";
 
-    // לוגיקה לעדכון סטטיסטיקות סופיות
     map<string, string> final_gen, final_tA, final_tB;
     for (const auto& e : events) {
         for (auto const& up : e.get_game_updates()) final_gen[up.first] = up.second;
@@ -179,7 +197,6 @@ void StompProtocol::saveSummary(string gameName, string user, string filePath) {
     outFile << events[0].get_team_b_name() << " stats:\n";
     for (auto const& stat : final_tB) outFile << "    " << stat.first << ": " << stat.second << "\n";
 
-    // רשימת האירועים (כבר עובד אצלך!)
     outFile << "Game event reports:\n";
     for (const auto& e : events) {
         outFile << e.get_time() << ": " << e.get_name() << "\n";

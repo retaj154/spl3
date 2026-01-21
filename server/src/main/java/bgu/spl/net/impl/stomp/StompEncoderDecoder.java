@@ -23,7 +23,6 @@ public class StompEncoderDecoder implements MessageEncoderDecoder<String> {
 
     @Override
     public byte[] encode(String message) {
-        // ONLY HERE we append the NULL terminator
         return (message + "\u0000").getBytes(StandardCharsets.UTF_8);
     }
 
