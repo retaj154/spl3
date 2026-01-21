@@ -4,250 +4,179 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
-import java.util.concurrent.ConcurrentHashMap;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
+/**
+ * Tiny helper for the assignment's Python SQL server.
+ *
+ * Protocol (matches sql_server.py):
+ * - send SQL string terminated with '\0'
+ * - receive response terminated with '\0'
+ *
+ * Response format:
+ * - SUCCESS
+ * - SUCCESS|row1|row2|...   (SELECT)
+ * - ERROR|<message>
+ */
 public class Database {
-	private final ConcurrentHashMap<String, User> userMap;
-	private final ConcurrentHashMap<Integer, User> connectionsIdMap;
-	private final String sqlHost;
-	private final int sqlPort;
 
-	private Database() {
-		userMap = new ConcurrentHashMap<>();
-		connectionsIdMap = new ConcurrentHashMap<>();
-		// SQL server connection details
-		this.sqlHost = "127.0.0.1";
-		this.sqlPort = 7778;
-	}
+    private static class Instance {
+        private static final Database instance = new Database();
+    }
 
-	public static Database getInstance() {
-		return Instance.instance;
-	}
+    public static Database getInstance() {
+        return Instance.instance;
+    }
 
-	/**
-	 * Execute SQL query and return result
-	 * @param sql SQL query string
-	 * @return Result string from SQL server
-	 */
-	private String executeSQL(String sql) {
-		try (Socket socket = new Socket(sqlHost, sqlPort);
-			 PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-			 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
-			
-			// Send SQL with null terminator
-			out.print(sql + '\0');
-			out.flush();
-			
-			// Read response until null terminator
-			StringBuilder response = new StringBuilder();
-			int ch;
-			while ((ch = in.read()) != -1 && ch != '\0') {
-				response.append((char) ch);
-			}
-			
-			return response.toString();
-			
-		} catch (Exception e) {
-			System.err.println("SQL Error: " + e.getMessage());
-			return "ERROR:" + e.getMessage();
-		}
-	}
+    private final String sqlHost = "127.0.0.1";
+    private final int sqlPort = 7778;
 
-	/**
-	 * Escape SQL special characters to prevent SQL injection
-	 */
-	private String escapeSql(String str) {
-		if (str == null) return "";
-		return str.replace("'", "''");
-	}
+    private Database() {}
 
-	public void addUser(User user) {
-		userMap.putIfAbsent(user.name, user);
-		connectionsIdMap.putIfAbsent(user.getConnectionId(), user);
-	}
+    private String executeSQL(String sql) {
+        try (Socket socket = new Socket(sqlHost, sqlPort);
+             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
 
-	public LoginStatus login(int connectionId, String username, String password) {
-		if (connectionsIdMap.containsKey(connectionId)) {
-			return LoginStatus.CLIENT_ALREADY_CONNECTED;
-		}
-		if (addNewUserCase(connectionId, username, password)) {
-			// Log new user registration in SQL
-			String sql = String.format(
-				"INSERT INTO users (username, password, registration_date) VALUES ('%s', '%s', datetime('now'))",
-				escapeSql(username), escapeSql(password)
-			);
-			executeSQL(sql);
-			
-			// Log login
-			logLogin(username);
-			return LoginStatus.ADDED_NEW_USER;
-		} else {
-			LoginStatus status = userExistsCase(connectionId, username, password);
-			if (status == LoginStatus.LOGGED_IN_SUCCESSFULLY) {
-				// Log successful login in SQL
-				logLogin(username);
-			}
-			return status;
-		}
-	}
+            out.print(sql + '\0');
+            out.flush();
 
-	private void logLogin(String username) {
-		String sql = String.format(
-			"INSERT INTO login_history (username, login_time) VALUES ('%s', datetime('now'))",
-			escapeSql(username)
-		);
-		executeSQL(sql);
-	}
+            StringBuilder resp = new StringBuilder();
+            int ch;
+            while ((ch = in.read()) != -1 && ch != '\0') {
+                resp.append((char) ch);
+            }
+            return resp.toString();
 
-	private LoginStatus userExistsCase(int connectionId, String username, String password) {
-		User user = userMap.get(username);
-		synchronized (user) {
-			if (user.isLoggedIn()) {
-				return LoginStatus.ALREADY_LOGGED_IN;
-			} else if (!user.password.equals(password)) {
-				return LoginStatus.WRONG_PASSWORD;
-			} else {
-				user.login();
-				user.setConnectionId(connectionId);
-				connectionsIdMap.put(connectionId, user);
-				return LoginStatus.LOGGED_IN_SUCCESSFULLY;
-			}
-		}
-	}
+        } catch (Exception e) {
+            System.err.println("[DB] SQL server error: " + e.getMessage());
+            return "ERROR|" + e.getMessage();
+        }
+    }
 
-	private boolean addNewUserCase(int connectionId, String username, String password) {
-		if (!userMap.containsKey(username)) {
-			synchronized (userMap) {
-				if (!userMap.containsKey(username)) {
-					User user = new User(connectionId, username, password);
-					user.login();
-					addUser(user);
-					return true;
-				}
-			}
-		}
-		return false;
-	}
+    private String esc(String s) {
+        if (s == null) return "";
+        return s.replace("'", "''");
+    }
 
-	public void logout(int connectionsId) {
-		User user = connectionsIdMap.get(connectionsId);
-		if (user != null) {
-			// Log logout in SQL
-			String sql = String.format(
-				"UPDATE login_history SET logout_time=datetime('now') " +
-				"WHERE username='%s' AND logout_time IS NULL " +
-				"ORDER BY login_time DESC LIMIT 1",
-				escapeSql(user.name)
-			);
-			executeSQL(sql);
-			
-			user.logout();
-			connectionsIdMap.remove(connectionsId);
-		}
-	}
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-	/**
-	 * Track file upload in SQL database
-	 * @param username User who uploaded the file
-	 * @param filename Name of the file
-	 * @param gameChannel Game channel the file was reported to
-	 */
-	public void trackFileUpload(String username, String filename, String gameChannel) {
-		String sql = String.format(
-			"INSERT INTO file_tracking (username, filename, upload_time, game_channel) " +
-			"VALUES ('%s', '%s', datetime('now'), '%s')",
-			escapeSql(username), escapeSql(filename), escapeSql(gameChannel)
-		);
-		executeSQL(sql);
-	}
+    private String now() {
+        return LocalDateTime.now().format(TS_FMT);
+    }
 
-	/**
-	 * Generate and print server report using SQL queries
-	 */
-	public void printReport() {
-		System.out.println(repeat("=", 80));
-		System.out.println("SERVER REPORT - Generated at: " + java.time.LocalDateTime.now());
-		System.out.println(repeat("=", 80));
-		
-		// List all users
-		System.out.println("\n1. REGISTERED USERS:");
-		System.out.println(repeat("-", 80));
-		String usersSQL = "SELECT username, registration_date FROM users ORDER BY registration_date";
-		String usersResult = executeSQL(usersSQL);
-		if (usersResult.startsWith("SUCCESS")) {
-			String[] parts = usersResult.split("\\|");
-			if (parts.length > 1) {
-				for (int i = 1; i < parts.length; i++) {
-					System.out.println("   " + parts[i]);
-				}
-			} else {
-				System.out.println("   No users registered");
-			}
-		}
-		
-		// Login history for each user
-		System.out.println("\n2. LOGIN HISTORY:");
-		System.out.println(repeat("-", 80));
-		String loginSQL = "SELECT username, login_time, logout_time FROM login_history ORDER BY username, login_time DESC";
-		String loginResult = executeSQL(loginSQL);
-		if (loginResult.startsWith("SUCCESS")) {
-			String[] parts = loginResult.split("\\|");
-			if (parts.length > 1) {
-				String currentUser = "";
-				for (int i = 1; i < parts.length; i++) {
-					String[] fields = parts[i].replace("(", "").replace(")", "").replace("'", "").split(", ");
-					if (fields.length >= 3) {
-						if (!fields[0].equals(currentUser)) {
-							currentUser = fields[0];
-							System.out.println("\n   User: " + currentUser);
-						}
-						System.out.println("      Login:  " + fields[1]);
-						System.out.println("      Logout: " + (fields[2].equals("None") ? "Still logged in" : fields[2]));
-					}
-				}
-			} else {
-				System.out.println("   No login history");
-			}
-		}
-		
-		// File uploads for each user
-		System.out.println("\n3. FILE UPLOADS:");
-		System.out.println(repeat("-", 80));
-		String filesSQL = "SELECT username, filename, upload_time, game_channel FROM file_tracking ORDER BY username, upload_time DESC";
-		String filesResult = executeSQL(filesSQL);
-		if (filesResult.startsWith("SUCCESS")) {
-			String[] parts = filesResult.split("\\|");
-			if (parts.length > 1) {
-				String currentUser = "";
-				for (int i = 1; i < parts.length; i++) {
-					String[] fields = parts[i].replace("(", "").replace(")", "").replace("'", "").split(", ");
-					if (fields.length >= 4) {
-						if (!fields[0].equals(currentUser)) {
-							currentUser = fields[0];
-							System.out.println("\n   User: " + currentUser);
-						}
-						System.out.println("      File: " + fields[1]);
-						System.out.println("      Time: " + fields[2]);
-						System.out.println("      Game: " + fields[3]);
-						System.out.println();
-					}
-				}
-			} else {
-				System.out.println("   No files uploaded");
-			}
-		}
-		
-	System.out.println(repeat("=", 80));
+    private boolean isSuccess(String resp) {
+        return resp != null && resp.startsWith("SUCCESS");
+    }
+
+    private List<String[]> parseRows(String resp) {
+        if (resp == null) return Collections.emptyList();
+        if (!resp.startsWith("SUCCESS")) return Collections.emptyList();
+        String[] parts = resp.split("\\|", -1);
+        if (parts.length <= 1) return Collections.emptyList();
+
+        List<String[]> rows = new ArrayList<>();
+        for (int i = 1; i < parts.length; i++) {
+            String row = parts[i];
+            if (row == null || row.isEmpty()) continue;
+            rows.add(row.split(",", -1));
+        }
+        return rows;
+    }
+
+    /** Returns null if user does not exist (or DB error). */
+    public String getPassword(String username) {
+        String sql = "SELECT password FROM users WHERE username='" + esc(username) + "'";
+        String resp = executeSQL(sql);
+        List<String[]> rows = parseRows(resp);
+        if (rows.isEmpty()) return null;
+        return rows.get(0).length > 0 ? rows.get(0)[0] : null;
+    }
+
+    /** Insert a new user. Returns true on success, false on error. */
+    public boolean registerUser(String username, String password) {
+        String sql = "INSERT INTO users(username,password) VALUES('" + esc(username) + "','" + esc(password) + "')";
+        String resp = executeSQL(sql);
+        return isSuccess(resp);
+    }
+
+    /** Insert a login session row (logout_time starts NULL). */
+    public void logLogin(String username) {
+        String sql = "INSERT INTO sessions(username,login_time,logout_time) VALUES('" + esc(username) + "','" + esc(now()) + "',NULL)";
+        executeSQL(sql);
+    }
+
+    /** Update latest session with NULL logout_time for this user. */
+    public void logLogout(String username) {
+        String ts = esc(now());
+        String u = esc(username);
+        String sql = "UPDATE sessions SET logout_time='" + ts + "' WHERE id=(SELECT id FROM sessions WHERE username='" + u + "' AND logout_time IS NULL ORDER BY id DESC LIMIT 1)";
+        executeSQL(sql);
+    }
+
+    /** Log a filename uploaded via report command. */
+    public void trackFileUpload(String username, String filename, String gameChannel) {
+        String sql = "INSERT INTO file_logs(username,filename,game_channel,upload_time) VALUES('" + esc(username) + "','" + esc(filename) + "','" + esc(gameChannel) + "','" + esc(now()) + "')";
+        executeSQL(sql);
+    }
+
+    /** Server-side report (must be based only on SQL query results). */
+    public void printReport() {
+        System.out.println("\n========== SERVER SQL REPORT (" + LocalDateTime.now() + ") ==========");
+
+        // 1) Users
+        System.out.println("\n1) Registered users:");
+        List<String[]> users = parseRows(executeSQL("SELECT username FROM users ORDER BY username"));
+        if (users.isEmpty()) {
+            System.out.println("   (none)");
+            System.out.println("======================================================\n");
+            return;
+        }
+        for (String[] r : users) {
+            System.out.println("   - " + r[0]);
+        }
+
+        // 2) Sessions per user
+        System.out.println("\n2) Login history:");
+        for (String[] u : users) {
+            String user = u[0];
+            System.out.println("\n   User: " + user);
+            List<String[]> sess = parseRows(executeSQL(
+                    "SELECT login_time, COALESCE(logout_time,'') FROM sessions WHERE username='" + esc(user) + "' ORDER BY id"));
+            if (sess.isEmpty()) {
+                System.out.println("      (no sessions)");
+            } else {
+                for (String[] s : sess) {
+                    String login = s.length > 0 ? s[0] : "";
+                    String logout = s.length > 1 ? s[1] : "";
+                    System.out.println("      login=" + login + " logout=" + (logout.isEmpty() ? "(still logged in)" : logout));
+                }
+            }
+        }
+
+        // 3) File uploads per user
+        System.out.println("\n3) Filenames uploaded via report:");
+        for (String[] u : users) {
+            String user = u[0];
+            System.out.println("\n   User: " + user);
+            List<String[]> files = parseRows(executeSQL(
+                    "SELECT filename, COALESCE(game_channel,''), upload_time FROM file_logs WHERE username='" + esc(user) + "' ORDER BY id"));
+            if (files.isEmpty()) {
+                System.out.println("      (no files)");
+            } else {
+                for (String[] f : files) {
+                    String fname = f.length > 0 ? f[0] : "";
+                    String chan = f.length > 1 ? f[1] : "";
+                    String time = f.length > 2 ? f[2] : "";
+                    System.out.println("      file='" + fname + "' channel='" + chan + "' time=" + time);
+                }
+            }
+        }
+
+        System.out.println("======================================================\n");
+    }
 }
-
-private String repeat(String str, int times) {
-	StringBuilder sb = new StringBuilder();
-	for (int i = 0; i < times; i++) {
-		sb.append(str);
-	}
-	return sb.toString();
-}
-
-private static class Instance {
-	static Database instance = new Database();
-}}

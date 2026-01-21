@@ -1,8 +1,31 @@
 package bgu.spl.net.impl.stomp;
 
+import bgu.spl.net.impl.data.Database;
 import bgu.spl.net.srv.Server;
 
+import java.util.Scanner;
+
 public class StompServer {
+
+    private static void startAdminConsole(Database db) {
+        Thread t = new Thread(() -> {
+            try {
+                Scanner sc = new Scanner(System.in);
+                while (true) {
+                    if (!sc.hasNextLine()) {
+                        return;
+                    }
+                    String line = sc.nextLine().trim();
+                    if (line.equalsIgnoreCase("report")) {
+                        db.printReport();
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }, "AdminConsole");
+        t.setDaemon(true);
+        t.start();
+    }
 
     public static void main(String[] args) {
 
@@ -14,18 +37,21 @@ public class StompServer {
         int port = Integer.parseInt(args[0]);
         String serverType = args[1];
 
+        // Optional: type "report" in the server console to print the SQL-based report
+        startAdminConsole(Database.getInstance());
+
         if (serverType.equals("tpc")) {
             Server.threadPerClient(
                     port,
-                    () -> new StompMessagingProtocolImpl(), 
-                    () -> new StompEncoderDecoder()      
+                    StompMessagingProtocolImpl::new,
+                    StompEncoderDecoder::new
             ).serve();
         } else if (serverType.equals("reactor")) {
             Server.reactor(
                     Runtime.getRuntime().availableProcessors(),
                     port,
-                    () -> new StompMessagingProtocolImpl(), 
-                    () -> new StompEncoderDecoder()         
+                    StompMessagingProtocolImpl::new,
+                    StompEncoderDecoder::new
             ).serve();
         } else {
             System.out.println("Unknown server type. Use 'tpc' or 'reactor'.");

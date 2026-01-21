@@ -61,4 +61,11 @@ public class ConnectionsImpl<T> implements Connections<T> {
     public ConcurrentLinkedQueue<Integer> getSubscribers(String channel) {
         return channelSubscribers.get(channel);
     }
+
+    /** Remove the given connection from all subscribed channels. */
+    public void unsubscribeAll(int connectionId) {
+        for (ConcurrentLinkedQueue<Integer> q : channelSubscribers.values()) {
+            q.remove(connectionId);
+        }
+    }
 }

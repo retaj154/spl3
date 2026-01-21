@@ -1,210 +1,327 @@
 #include "../include/StompProtocol.h"
-#include <iostream>
 #include <sstream>
-#include "../include/StompProtocol.h"
-using namespace std;
-#include <fstream>
+#include <cctype>
 
-StompProtocol::StompProtocol() : subscriptionIdCounter(0), receiptIdCounter(0), topicToSubId(), logoutReceiptId(-1) {}
- 
+StompProtocol::StompProtocol()
+        : subscriptionIdCounter(1), receiptIdCounter(1),
+          topicToSubId(), game_reports(), receiptToPrint(),
+          logoutReceiptId(-1) {}
 
-string StompProtocol::processInput(string line, string username) {
+int StompProtocol::halftimePhase(const Event &e) {
+    auto &m = e.get_game_updates();
+    auto it = m.find("before halftime");
+    if (it == m.end()) return 2;
+    string v = trim(it->second);
+    for (char &c : v) c = (char)tolower(c);
+    if (v == "true" || v == "1" || v == "yes") return 0;
+    if (v == "false" || v == "0" || v == "no") return 1;
+    return 2;
+}
+
+bool StompProtocol::eventLess(const Event &a, const Event &b) {
+    int pa = halftimePhase(a);
+    int pb = halftimePhase(b);
+
+    // If we can distinguish halves, order by half first.
+    if (pa != 2 || pb != 2) {
+        if (pa == 2) pa = 1; // unknown -> treat as after halftime
+        if (pb == 2) pb = 1;
+        if (pa != pb) return pa < pb;
+    }
+
+    // Then by time.
+    if (a.get_time() != b.get_time())
+        return a.get_time() < b.get_time();
+
+    // Stable tie-breaker (shouldn't matter per assumptions)
+    return a.get_name() < b.get_name();
+}
+
+string StompProtocol::trim(const string &s) {
+    size_t b = s.find_first_not_of(" \t\r");
+    if (b == string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r");
+    return s.substr(b, e - b + 1);
+}
+
+bool StompProtocol::startsWith(const string &s, const string &prefix) {
+    return s.rfind(prefix, 0) == 0;
+}
+
+bool StompProtocol::parseKeyValue(const string &line, string &key, string &val) {
+    // Accept both "k:v" and "k : v" and allow leading spaces.
+    string t = trim(line);
+    if (t.empty()) return false;
+    size_t pos = t.find(':');
+    if (pos == string::npos) return false;
+    key = trim(t.substr(0, pos));
+    val = trim(t.substr(pos + 1));
+    return !key.empty();
+}
+
+string StompProtocol::processInput(const string &line, const string &username) {
     stringstream ss(line);
     string command;
-    ss >> command; 
+    ss >> command;
 
-    if (command == "login") {
-    string hostPort, user, pass;
-    ss >> hostPort >> user >> pass;
-    if (hostPort.empty() || user.empty() || pass.empty()) return "";
-
-    return "CONNECT\n"
-           "accept-version:1.2\n"
-           "host:" + hostPort + "\n"
-           "login:" + user + "\n"
-           "passcode:" + pass + "\n"
-           "\n";
-}
-
-    
     if (command == "join") {
-        string destination;
-        ss >> destination; 
-        destination="/"+destination;
-        if (destination.empty()) return "";
-        
-        int id = subscriptionIdCounter++;
-        topicToSubId[destination] = id;
+        string game;
+        ss >> game;
+        if (game.empty()) return "";
+
+        string destination = "/" + game;
+        int subId = subscriptionIdCounter++;
+        int receiptId = receiptIdCounter++;
+
+        topicToSubId[destination] = subId;
+        receiptToPrint[receiptId] = "Joined channel " + game;
 
         return "SUBSCRIBE\n"
-               "destination:" + destination + "\n"
-               "id:" + to_string(id) + "\n"
-               "receipt:" + to_string(receiptIdCounter++) + "\n"
-               "\n";
+               "destination:" + destination + "\n" +
+               "id:" + to_string(subId) + "\n" +
+               "receipt:" + to_string(receiptId) + "\n\n";
     }
-    
+
     if (command == "exit") {
-        string destination;
-        ss >> destination;
-        destination="/"+destination;
-        if (destination.empty()) return "";
-        
-        if (topicToSubId.find(destination) == topicToSubId.end()) {
-            cout << "Error: You are not subscribed to " << destination << endl;
-            return "";
-        }
-        
-        int id = topicToSubId[destination];
-        topicToSubId.erase(destination);
-        
+        string game;
+        ss >> game;
+        if (game.empty()) return "";
+
+        string destination = "/" + game;
+        auto it = topicToSubId.find(destination);
+        if (it == topicToSubId.end()) return "";
+
+        int subId = it->second;
+        int receiptId = receiptIdCounter++;
+
+        receiptToPrint[receiptId] = "Exited channel " + game;
+        topicToSubId.erase(it);
+
         return "UNSUBSCRIBE\n"
-               "id:" + to_string(id) + "\n"
-               "receipt:" + to_string(receiptIdCounter++) + "\n"
-               "\n";
+               "id:" + to_string(subId) + "\n" +
+               "receipt:" + to_string(receiptId) + "\n\n";
     }
-    
+
     if (command == "add") {
-    string destination;
-    ss >> destination;
-    if (destination.empty()) return "";
+        // add {game_name} {book_name}
+        string game;
+        ss >> game;
+        string book;
+        getline(ss, book);
+        book = trim(book);
+        if (game.empty() || book.empty()) return "";
 
-    string body;
-    getline(ss, body);
-    if (!body.empty() && body[0] == ' ') body.erase(0, 1);
+        string destination = "/" + game;
+        return "SEND\n"
+               "destination:" + destination + "\n\n" +
+               username + " wish to borrow " + book + "\n";
+    }
 
-    int receipt = receiptIdCounter++;
-
-    return "SEND\n"
-           "destination:/" + destination + "\n"
-           "receipt:" + to_string(receipt) + "\n"
-           "\n" +
-           body + "\n";
-}
-
-    
     if (command == "logout") {
-    logoutReceiptId = receiptIdCounter++;
-    return "DISCONNECT\n"
-           "receipt:" + to_string(logoutReceiptId) + "\n"
-           "\n";
-}
+        int receiptId = receiptIdCounter++;
+        logoutReceiptId = receiptId;
+        receiptToPrint[receiptId] = "Logout successful";
 
+        return "DISCONNECT\n"
+               "receipt:" + to_string(receiptId) + "\n\n";
+    }
 
     return "";
 }
 
-bool StompProtocol::shouldTerminate(string response) {
-    if (logoutReceiptId == -1) return false;
-    return response.find("RECEIPT") != string::npos &&
-           response.find("receipt-id:" + to_string(logoutReceiptId)) != string::npos;
+string StompProtocol::createReportFrame(const Event &event, const string &username, const string &fileNameHeader) {
+    // SEND headers
+    string destination = "/" + event.get_team_a_name() + "_" + event.get_team_b_name();
+
+    string frame = "SEND\n";
+    frame += "destination:" + destination + "\n";
+
+    // Optional header used only for server-side file tracking (Stage 3.3)
+    if (!fileNameHeader.empty()) {
+        frame += "file:" + fileNameHeader + "\n";
+    }
+
+    frame += "\n";
+
+    // Body formatted like the assignment's example (human-readable "key : value" lines)
+    frame += "user : " + username + "\n";
+    frame += "team a : " + event.get_team_a_name() + "\n";
+    frame += "team b : " + event.get_team_b_name() + "\n";
+    frame += "event name : " + event.get_name() + "\n";
+    frame += "time : " + to_string(event.get_time()) + "\n";
+
+    frame += "general game updates :\n";
+    for (const auto &kv : event.get_game_updates()) {
+        frame += kv.first + " : " + kv.second + "\n";
+    }
+
+    frame += "team a updates :\n";
+    for (const auto &kv : event.get_team_a_updates()) {
+        frame += kv.first + " : " + kv.second + "\n";
+    }
+
+    frame += "team b updates :\n";
+    for (const auto &kv : event.get_team_b_updates()) {
+        frame += kv.first + " : " + kv.second + "\n";
+    }
+
+    frame += "description :\n";
+    frame += event.get_discription() + "\n";
+
+    return frame;
 }
 
+void StompProtocol::processMessage(const string &frame) {
+    // Extract destination header
+    string gameName;
+    {
+        istringstream iss(frame);
+        string line;
+        while (getline(iss, line)) {
+            line = trim(line);
+            if (line.empty()) break;
+            if (startsWith(line, "destination:")) {
+                string dest = trim(line.substr(string("destination:").size()));
+                if (!dest.empty() && dest[0] == '/') dest = dest.substr(1);
+                gameName = dest;
+            }
+        }
+    }
+    if (gameName.empty()) return;
 
-std::string StompProtocol::createReportFrame(const Event& event, std::string username) {
-    std::string body = "user: " + username + "\n";
-    body += "team a: " + event.get_team_a_name() + "\n";
-    body += "team b: " + event.get_team_b_name() + "\n";
-    body += "event name: " + event.get_name() + "\n";
-    body += "time: " + std::to_string(event.get_time()) + "\n";
-    
-    body += "general game updates:\n";
-    for (auto const& update : event.get_game_updates()) {
-        body += "    " + update.first + ": " + update.second + "\n";
-    }
-    
-    body += "team a updates:\n";
-    for (auto const& update : event.get_team_a_updates()) {
-        body += "    " + update.first + ": " + update.second + "\n";
-    }
-    
-    body += "team b updates:\n";
-    for (auto const& update : event.get_team_b_updates()) {
-        body += "    " + update.first + ": " + update.second + "\n";
-    }
-    
-    body += "description:\n" + event.get_discription() + "\n";
+    // Extract body (after empty line)
+    size_t sep = frame.find("\n\n");
+    if (sep == string::npos) return;
+    string body = frame.substr(sep + 2);
 
-    std::string destination = event.get_team_a_name() + "_" + event.get_team_b_name();
-    return  "SEND\n"
-       "destination:/" + destination + "\n"
-       "\n" + body + "\n";
-}
-void StompProtocol::processMessage(string frame) {
-    stringstream ss(frame);
-    string line, gameName, user, description, eventName;
-    map<string, string> gen_up, tA_up, tB_up;
-    string tA, tB;
+    istringstream bodyStream(body);
+    string line;
+
+    string user;
+    string teamA;
+    string teamB;
+    string eventName;
     int time = 0;
 
-    while (getline(ss, line) && line != "") {
-        if (line.find("destination:/") == 0) {
-            gameName = line.substr(13);
+    map<string, string> gameUpdates;
+    map<string, string> teamAUpdates;
+    map<string, string> teamBUpdates;
+    string description;
+
+    enum Section { NONE, GEN, A, B, DESC } section = NONE;
+
+    while (getline(bodyStream, line)) {
+        string t = trim(line);
+        if (t.empty()) continue;
+
+        if (t.rfind("general game updates", 0) == 0) {
+            section = GEN;
+            continue;
+        }
+        if (t.rfind("team a updates", 0) == 0) {
+            section = A;
+            continue;
+        }
+        if (t.rfind("team b updates", 0) == 0) {
+            section = B;
+            continue;
+        }
+        if (t.rfind("description", 0) == 0) {
+            section = DESC;
+            // description itself continues on following lines
+            continue;
+        }
+
+        string key, val;
+        if (section == DESC) {
+            // Multi-line description: keep as-is with newlines
+            if (!description.empty()) description += "\n";
+            description += line; // keep original spacing
+            continue;
+        }
+
+        if (!parseKeyValue(line, key, val)) continue;
+
+        if (key == "user") user = val;
+        else if (key == "team a") teamA = val;
+        else if (key == "team b") teamB = val;
+        else if (key == "event name") eventName = val;
+        else if (key == "time") {
+            try { time = stoi(val); } catch (...) { time = 0; }
+        } else {
+            if (section == GEN) gameUpdates[key] = val;
+            else if (section == A) teamAUpdates[key] = val;
+            else if (section == B) teamBUpdates[key] = val;
         }
     }
 
-    string section = "";
-    while (getline(ss, line)) {
-        if (line.find("user: ") == 0) user = line.substr(6);
-        else if (line.find("team a: ") == 0) tA = line.substr(8);
-        else if (line.find("team b: ") == 0) tB = line.substr(8);
-        else if (line.find("event name: ") == 0) eventName = line.substr(12);
-        else if (line.find("time: ") == 0) time = stoi(line.substr(6));
-        else if (line.find("general game updates:") == 0) section = "gen";
-        else if (line.find("team a updates:") == 0) section = "tA";
-        else if (line.find("team b updates:") == 0) section = "tB";
-        else if (line.find("description:") == 0) section = "desc";
-        else if (line.find("    ") == 0) { // עיבוד עדכונים עם 4 רווחים
-            size_t colon = line.find(":");
-            string key = line.substr(4, colon - 4);
-            string val = line.substr(colon + 2);
-            if (section == "gen") gen_up[key] = val;
-            else if (section == "tA") tA_up[key] = val;
-            else if (section == "tB") tB_up[key] = val;
-        }
-        else if (section == "desc") description += line + "\n";
-    }
+    if (user.empty() || teamA.empty() || teamB.empty() || eventName.empty()) return;
 
-    Event e(tA, tB, eventName, time, gen_up, tA_up, tB_up, description);
-    game_reports[gameName][user].push_back(e);
-}
-void StompProtocol::saveSummary(string gameName, string user, string filePath) {
-    ofstream outFile(filePath);
-    if (!outFile.is_open()) return;
+    Event ev(teamA, teamB, eventName, time, gameUpdates, teamAUpdates, teamBUpdates, description);
+    game_reports[gameName][user].push_back(ev);
 
-    auto& events = game_reports[gameName][user];
-    sort(events.begin(), events.end(), [](const Event& a, const Event& b) {
-        return a.get_time() < b.get_time();
-    });
-
-    string displayGame = gameName;
-    size_t underscore = displayGame.find('_');
-    if (underscore != string::npos) displayGame.replace(underscore, 1, " vs ");
-    outFile << displayGame << "\n";
-
-    map<string, string> final_gen, final_tA, final_tB;
-    for (const auto& e : events) {
-        for (auto const& up : e.get_game_updates()) final_gen[up.first] = up.second;
-        for (auto const& up : e.get_team_a_updates()) final_tA[up.first] = up.second;
-        for (auto const& up : e.get_team_b_updates()) final_tB[up.first] = up.second;
-    }
-
-    outFile << "Game stats:\nGeneral stats:\n";
-    for (auto const& stat : final_gen) outFile << "    " << stat.first << ": " << stat.second << "\n";
-    
-    outFile << events[0].get_team_a_name() << " stats:\n";
-    for (auto const& stat : final_tA) outFile << "    " << stat.first << ": " << stat.second << "\n";
-    
-    outFile << events[0].get_team_b_name() << " stats:\n";
-    for (auto const& stat : final_tB) outFile << "    " << stat.first << ": " << stat.second << "\n";
-
-    outFile << "Game event reports:\n";
-    for (const auto& e : events) {
-        outFile << e.get_time() << ": " << e.get_name() << "\n";
-        string d = e.get_discription();
-        outFile << (d.length() > 27 ? d.substr(0, 27) + "..." : d) << "\n\n";
-    }
-    outFile.close();
-
-
+    // Keep events ordered (handle halftime edge-case)
+    auto &vec = game_reports[gameName][user];
+    sort(vec.begin(), vec.end(), eventLess);
 }
 
+void StompProtocol::saveSentEvent(const Event &event, const string &username) {
+    string gameName = event.get_team_a_name() + "_" + event.get_team_b_name();
+    game_reports[gameName][username].push_back(event);
+    auto &vec = game_reports[gameName][username];
+    sort(vec.begin(), vec.end(), eventLess);
+}
+
+void StompProtocol::saveSummary(const string &gameName, const string &user, const string &filePath) {
+    auto gameIt = game_reports.find(gameName);
+    if (gameIt == game_reports.end()) return;
+
+    auto userIt = gameIt->second.find(user);
+    if (userIt == gameIt->second.end()) return;
+
+    const vector<Event> &events = userIt->second;
+    if (events.empty()) return;
+
+    // Accumulate latest updates
+    map<string, string> generalStats;
+    map<string, string> aStats;
+    map<string, string> bStats;
+
+    for (const Event &e : events) {
+        for (const auto &kv : e.get_game_updates()) generalStats[kv.first] = kv.second;
+        for (const auto &kv : e.get_team_a_updates()) aStats[kv.first] = kv.second;
+        for (const auto &kv : e.get_team_b_updates()) bStats[kv.first] = kv.second;
+    }
+
+    string teamA = events[0].get_team_a_name();
+    string teamB = events[0].get_team_b_name();
+
+    ofstream out(filePath);
+    out << teamA << " vs " << teamB << "\n";
+    out << "Game stats :\n";
+    out << "General stats :\n";
+    for (const auto &kv : generalStats) out << kv.first << ": " << kv.second << "\n";
+    out << teamA << " stats :\n";
+    for (const auto &kv : aStats) out << kv.first << ": " << kv.second << "\n";
+    out << teamB << " stats :\n";
+    for (const auto &kv : bStats) out << kv.first << ": " << kv.second << "\n";
+
+    out << "Game event reports :\n";
+    for (const Event &e : events) {
+        out << e.get_time() << " - " << e.get_name() << ":\n";
+        out << e.get_discription() << "\n";
+    }
+    out.close();
+}
+
+string StompProtocol::onReceipt(int receiptId) {
+    auto it = receiptToPrint.find(receiptId);
+    if (it == receiptToPrint.end()) return "";
+    string msg = it->second;
+    receiptToPrint.erase(it);
+    return msg;
+}
+
+bool StompProtocol::isLogoutReceipt(int receiptId) const {
+    return receiptId == logoutReceiptId;
+}

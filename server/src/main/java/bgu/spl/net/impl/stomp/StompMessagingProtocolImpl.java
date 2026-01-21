@@ -1,6 +1,7 @@
 package bgu.spl.net.impl.stomp;
 
 import bgu.spl.net.api.StompMessagingProtocol;
+import bgu.spl.net.impl.data.Database;
 import bgu.spl.net.impl.data.User;
 import bgu.spl.net.srv.Connections;
 
@@ -18,9 +19,16 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
 
     private static final AtomicInteger messageIdCounter = new AtomicInteger(0);
 
-    private static final ConcurrentHashMap<String, User> usersMap = new ConcurrentHashMap<>();
-    private User currentUser = null;
+    // Active users only (login/password lives in SQL)
+    private static final ConcurrentHashMap<String, User> activeByName = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Integer, User> activeByConn = new ConcurrentHashMap<>();
 
+    // Best-effort de-dup for file tracking
+    private static final ConcurrentHashMap<String, Boolean> fileUploadOnce = new ConcurrentHashMap<>();
+
+    private final Database db = Database.getInstance();
+
+    private User currentUser = null;
     private String lastFrame = "";
 
     @Override
@@ -32,330 +40,307 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     @Override
     public String process(String message) {
         if (message == null) return null;
+        lastFrame = message;
 
-        lastFrame = message; 
-
-        String[] lines = message.split("\n");
+        String[] lines = message.split("\n", -1);
         if (lines.length == 0) return null;
 
         String command = lines[0].trim();
-        Map<String, String> headers = parseHeaders(lines);
-        String body = extractBody(message);
-
-        if (currentUser == null && !command.equals("CONNECT")) {
-            sendError(
-                    "Not logged in",
-                    headers.get("receipt"),
-                    "You must CONNECT first",
-                    lastFrame
-            );
-            return null;
-        }
+        Map<String, String> headers = new HashMap<>();
+        String body = parseHeadersAndBody(lines, headers);
 
         switch (command) {
             case "CONNECT":
-                if (currentUser != null && currentUser.isLoggedIn()) {
-                    sendError("malformed frame received",
-                            headers.get("receipt"),
-                            "Already connected. CONNECT is allowed only once per connection.",
-                            lastFrame);
-                    return null;
-                }
                 handleConnect(headers);
                 break;
-
-            case "SEND":
-                handleSend(headers, body);
-                break;
-
             case "SUBSCRIBE":
                 handleSubscribe(headers);
                 break;
-
             case "UNSUBSCRIBE":
                 handleUnsubscribe(headers);
                 break;
-
+            case "SEND":
+                handleSend(headers, body);
+                break;
             case "DISCONNECT":
                 handleDisconnect(headers);
                 break;
-
             default:
-                sendError(
-                        "malformed frame received",
-                        headers.get("receipt"),
-                        "Command not recognized",
-                        lastFrame
-                );
-                break;
+                sendError("Malformed Frame", "Unknown command: " + command, headers.get("receipt"));
         }
 
         return null;
     }
 
-    @Override
-    public boolean shouldTerminate() {
-        return shouldTerminate;
+    private String parseHeadersAndBody(String[] lines, Map<String, String> headers) {
+        boolean inBody = false;
+        StringBuilder body = new StringBuilder();
+        for (int i = 1; i < lines.length; i++) {
+            String line = lines[i];
+            if (!inBody) {
+                if (line.trim().isEmpty()) {
+                    inBody = true;
+                    continue;
+                }
+                int idx = line.indexOf(':');
+                if (idx < 0) continue;
+                String key = line.substring(0, idx).trim();
+                String val = line.substring(idx + 1).trim();
+                headers.put(key, val);
+            } else {
+                body.append(line);
+                if (i < lines.length - 1) body.append("\n");
+            }
+        }
+        return body.toString();
     }
 
+    private boolean isLoggedIn() {
+        return currentUser != null && currentUser.isLoggedIn();
+    }
 
     private void handleConnect(Map<String, String> headers) {
+        String receipt = headers.get("receipt");
         String login = headers.get("login");
         String passcode = headers.get("passcode");
-        String receipt = headers.get("receipt");
-        
+
         if (login == null || passcode == null) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Missing login or passcode header",
-                    lastFrame
-            );
+            sendError("Malformed Frame", "Missing login/passcode", receipt);
             return;
         }
 
-        synchronized (usersMap) {
-            User user = usersMap.get(login);
+        if (isLoggedIn()) {
+            sendError("Permission denied", "Client already logged in", receipt);
+            return;
+        }
 
-            if (user == null) {
-                user = new User(connectionId, login, passcode);
-                usersMap.put(login, user);
-            } else {
-                if (!user.password.equals(passcode)) {
-                    sendError(
-                            "malformed frame received",
-                            receipt,
-                            "Wrong password",
-                            lastFrame
-                    );
-                    return;
-                }
-                if (user.isLoggedIn()) {
-                    sendError(
-                            "malformed frame received",
-                            receipt,
-                            "User already logged in",
-                            lastFrame
-                    );
-                    return;
-                }
+        User already = activeByName.get(login);
+        if (already != null && already.isLoggedIn()) {
+            sendError("User already logged in", "User already logged in", receipt);
+            return;
+        }
+
+        // Load password from DB (null means user does not exist)
+        String storedPassword = db.getPassword(login);
+        if (storedPassword == null) {
+            // New user: register in DB
+            boolean ok = db.registerUser(login, passcode);
+            if (!ok) {
+                sendError("Server error", "SQL registration failed", receipt);
+                return;
             }
+        } else {
+            if (!storedPassword.equals(passcode)) {
+                sendError("Wrong password", "Wrong password", receipt);
+                return;
+            }
+        }
 
-            user.setConnectionId(connectionId);
-            user.login();
-            currentUser = user;
+        currentUser = new User(connectionId, login, passcode);
+        currentUser.login();
+        activeByName.put(login, currentUser);
+        activeByConn.put(connectionId, currentUser);
 
-            sendConnected();
-            if (receipt != null) sendReceipt(receipt);
+        db.logLogin(login);
+
+        connections.send(connectionId, createConnectedFrame());
+        if (receipt != null) {
+            connections.send(connectionId, createReceiptFrame(receipt));
         }
     }
 
     private void handleSubscribe(Map<String, String> headers) {
+        String receipt = headers.get("receipt");
+        if (!isLoggedIn()) {
+            sendError("Permission denied", "Not logged in", receipt);
+            return;
+        }
+
         String topic = headers.get("destination");
         String subId = headers.get("id");
-        String receipt = headers.get("receipt");
-
         if (topic == null || subId == null) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Missing destination or id header",
-                    lastFrame
-            );
+            sendError("Malformed Frame", "Missing destination/id", receipt);
             return;
         }
 
+        if (!(connections instanceof ConnectionsImpl)) {
+            sendError("Server error", "Connections implementation mismatch", receipt);
+            return;
+        }
+
+        ConnectionsImpl<String> connImpl = (ConnectionsImpl<String>) connections;
+        connImpl.subscribe(topic, connectionId);
         currentUser.addSubscription(topic, subId);
 
-        if (connections instanceof ConnectionsImpl) {
-            ((ConnectionsImpl<String>) connections).subscribe(topic, connectionId);
-        } else {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Server connections implementation mismatch",
-                    lastFrame
-            );
-            return;
+        if (receipt != null) {
+            connections.send(connectionId, createReceiptFrame(receipt));
         }
-
-        if (receipt != null) sendReceipt(receipt);
     }
 
     private void handleUnsubscribe(Map<String, String> headers) {
-        String subId = headers.get("id");
         String receipt = headers.get("receipt");
+        if (!isLoggedIn()) {
+            sendError("Permission denied", "Not logged in", receipt);
+            return;
+        }
 
+        String subId = headers.get("id");
         if (subId == null) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Missing id header",
-                    lastFrame
-            );
+            sendError("Malformed Frame", "Missing id", receipt);
             return;
         }
 
         String topic = currentUser.getTopic(subId);
         if (topic == null) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Unknown subscription id",
-                    lastFrame
-            );
+            sendError("Permission denied", "Not subscribed", receipt);
             return;
         }
 
         currentUser.removeSubscription(subId);
 
-        if (connections instanceof ConnectionsImpl) {
-            ((ConnectionsImpl<String>) connections).unsubscribe(topic, connectionId);
+        if (!(connections instanceof ConnectionsImpl)) {
+            sendError("Server error", "Connections implementation mismatch", receipt);
+            return;
         }
 
-        if (receipt != null) sendReceipt(receipt);
+        ConnectionsImpl<String> connImpl = (ConnectionsImpl<String>) connections;
+        connImpl.unsubscribe(topic, connectionId);
+
+        if (receipt != null) {
+            connections.send(connectionId, createReceiptFrame(receipt));
+        }
     }
 
     private void handleSend(Map<String, String> headers, String body) {
-        String topic = headers.get("destination");
         String receipt = headers.get("receipt");
-
-        if (topic == null) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Did not contain a destination header, which is REQUIRED for message propagation.",
-                    lastFrame
-            );
+        if (!isLoggedIn()) {
+            sendError("Permission denied", "Not logged in", receipt);
             return;
         }
 
-        if (currentUser.getSubscriptionId(topic) == null) {
-            sendError(
-                    "Permission denied",
-                    receipt,
-                    "Not subscribed to topic",
-                    lastFrame
-            );
+        String topic = headers.get("destination");
+        if (topic == null) {
+            sendError("Malformed Frame", "Missing destination", receipt);
             return;
+        }
+
+        // Per assignment: if not subscribed -> ERROR + disconnect
+        if (currentUser.getSubscriptionId(topic) == null) {
+            sendError("Permission denied", "Not subscribed to topic", receipt);
+            return;
+        }
+
+        // File tracking (best-effort): client may include a "file" header in the SEND frame.
+        String filename = headers.get("file");
+        if (filename != null && !filename.isEmpty()) {
+            String key = currentUser.name + "|" + filename + "|" + topic;
+            if (fileUploadOnce.putIfAbsent(key, Boolean.TRUE) == null) {
+                db.trackFileUpload(currentUser.name, filename, topic);
+            }
         }
 
         if (!(connections instanceof ConnectionsImpl)) {
-            sendError(
-                    "malformed frame received",
-                    receipt,
-                    "Server connections implementation mismatch",
-                    lastFrame
-            );
+            sendError("Server error", "Connections implementation mismatch", receipt);
             return;
         }
 
         ConnectionsImpl<String> connImpl = (ConnectionsImpl<String>) connections;
         ConcurrentLinkedQueue<Integer> subscribers = connImpl.getSubscribers(topic);
 
-        int msgId = messageIdCounter.incrementAndGet();
         if (subscribers != null) {
             for (Integer targetConnId : subscribers) {
-                User targetUser = findUserByConnectionId(targetConnId);
+                User targetUser = activeByConn.get(targetConnId);
                 if (targetUser == null) continue;
 
                 String targetSubId = targetUser.getSubscriptionId(topic);
                 if (targetSubId == null) continue;
 
-                String msgFrame = createMessageFrame(topic, targetSubId, body,msgId);
+                String msgFrame = createMessageFrame(topic, targetSubId, body);
                 connections.send(targetConnId, msgFrame);
             }
         }
 
-        if (receipt != null) sendReceipt(receipt);
+        if (receipt != null) {
+            connections.send(connectionId, createReceiptFrame(receipt));
+        }
     }
 
     private void handleDisconnect(Map<String, String> headers) {
-        String receiptId = headers.get("receipt");
+        String receipt = headers.get("receipt");
 
-        if (receiptId != null) sendReceipt(receiptId);
+        if (receipt != null) {
+            connections.send(connectionId, createReceiptFrame(receipt));
+        }
+
+        // Graceful disconnect
+        cleanupAndDisconnect(false);
+    }
+
+    private void sendError(String shortMsg, String details, String receipt) {
+        connections.send(connectionId, createErrorFrame(shortMsg, details, receipt));
+        cleanupAndDisconnect(true);
+    }
+
+    private void cleanupAndDisconnect(boolean dueToError) {
+        // Log logout only if the user was logged-in
+        if (currentUser != null && currentUser.isLoggedIn()) {
+            db.logLogout(currentUser.name);
+        }
+
+        // Unsubscribe all + remove from active maps
+        if (connections instanceof ConnectionsImpl) {
+            ((ConnectionsImpl<String>) connections).unsubscribeAll(connectionId);
+        }
 
         if (currentUser != null) {
-            currentUser.logout();
+            activeByConn.remove(connectionId, currentUser);
+            activeByName.remove(currentUser.name, currentUser);
             currentUser.clearSubscriptions();
-            currentUser = null;
+            currentUser.logout();
         }
 
         shouldTerminate = true;
         connections.disconnect(connectionId);
     }
 
-
-    private User findUserByConnectionId(int connId) {
-        for (User u : usersMap.values()) {
-            if (u.getConnectionId() == connId && u.isLoggedIn()) return u;
-        }
-        return null;
+    private String createConnectedFrame() {
+        return "CONNECTED\n" +
+                "version:1.2\n" +
+                "\n";
     }
 
-    private String createMessageFrame(String topic, String subId, String body, int msgId) {
-        return "MESSAGE\n" +
-                "subscription:" + subId + "\n" +
-                "message-id:" + msgId + "\n" +
-                "destination:" + topic + "\n\n" +
-                body;
+    private String createReceiptFrame(String receiptId) {
+        return "RECEIPT\n" +
+                "receipt-id:" + receiptId + "\n" +
+                "\n";
     }
 
-    private void sendConnected() {
-        connections.send(connectionId, "CONNECTED\nversion:1.2\n\n");
-    }
-
-    private void sendReceipt(String receiptId) {
-        connections.send(connectionId, "RECEIPT\nreceipt-id:" + receiptId + "\n\n");
-    }
-
-    private void sendError(String shortMsg, String receiptId, String details, String originalFrame) {
+    private String createErrorFrame(String shortMsg, String details, String receiptId) {
         StringBuilder sb = new StringBuilder();
         sb.append("ERROR\n");
-
+        sb.append("message:").append(shortMsg).append("\n");
         if (receiptId != null) {
-            sb.append("receipt-id: ").append(receiptId).append("\n");
+            sb.append("receipt-id:").append(receiptId).append("\n");
         }
-
-        sb.append("message: ").append(shortMsg).append("\n");
-        sb.append("\n"); 
-
-        if (originalFrame != null && !originalFrame.isEmpty()) {
-            sb.append("The message:\n");
-            sb.append("----\n");
-            sb.append(originalFrame).append("\n");
-            sb.append("----\n");
-        }
-
-        if (details != null && !details.isEmpty()) {
-            sb.append(details).append("\n");
-        }
-
-        connections.send(connectionId, sb.toString());
-
-        shouldTerminate = true;
-        connections.disconnect(connectionId);
+        sb.append("\n");
+        sb.append("The message:\n----\n");
+        sb.append(lastFrame).append("\n----\n");
+        sb.append(details).append("\n");
+        return sb.toString();
     }
 
-    private Map<String, String> parseHeaders(String[] lines) {
-        Map<String, String> headers = new HashMap<>();
-        for (int i = 1; i < lines.length; i++) {
-            String line = lines[i];
-            if (line == null) break;
-            line = line.trim();
-            if (line.isEmpty()) break;
-
-            String[] parts = line.split(":", 2);
-            if (parts.length == 2) {
-                headers.put(parts[0].trim(), parts[1].trim());
-            }
-        }
-        return headers;
+    private String createMessageFrame(String topic, String subscriptionId, String body) {
+        int msgId = messageIdCounter.incrementAndGet();
+        return "MESSAGE\n" +
+                "subscription:" + subscriptionId + "\n" +
+                "message-id:" + msgId + "\n" +
+                "destination:" + topic + "\n" +
+                "\n" +
+                (body == null ? "" : body);
     }
 
-    private String extractBody(String msg) {
-        int idx = msg.indexOf("\n\n");
-        if (idx == -1) return "";
-        return msg.substring(idx + 2);
+    @Override
+    public boolean shouldTerminate() {
+        return shouldTerminate;
     }
 }

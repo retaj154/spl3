@@ -6,6 +6,19 @@ IMPORTANT:
 DO NOT CHANGE the server name or the basic protocol.
 Students should EXTEND this server by implementing
 the methods below.
+
+Protocol (DO NOT CHANGE):
+- Client sends an SQL string terminated with a null byte (\0)
+- Server responds with a string terminated with a null byte (\0)
+
+Response format:
+- SUCCESS                     (for commands that succeed)
+- SUCCESS|row1|row2|...        (for SELECT queries; each row is comma-separated)
+- ERROR|<message>              (on any error)
+
+Notes:
+- This server uses SQLite file DB_FILE.
+- You may change the schema as you wish (relational design principles).
 """
 
 import socket
@@ -30,65 +43,124 @@ def recv_null_terminated(sock: socket.socket) -> str:
 
 
 def init_database():
+    """Initialize DB schema (idempotent). Also performs minimal migrations."""
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY)')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS sessions 
-                      (username TEXT, login_time TEXT, logout_time TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS file_logs 
-                      (username TEXT, filename TEXT, upload_time TEXT)''')
+    cur = conn.cursor()
+
+    # Users (must store password for STOMP login semantics)
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS users ("
+        "username TEXT PRIMARY KEY,"
+        "password TEXT NOT NULL"
+        ")"
+    )
+
+    # Sessions: login/logout timestamps
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "username TEXT NOT NULL,"
+        "login_time TEXT NOT NULL,"
+        "logout_time TEXT,"
+        "FOREIGN KEY(username) REFERENCES users(username)"
+        ")"
+    )
+
+    # File uploads tracked per report command
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS file_logs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "username TEXT NOT NULL,"
+        "filename TEXT NOT NULL,"
+        "game_channel TEXT,"
+        "upload_time TEXT NOT NULL,"
+        "FOREIGN KEY(username) REFERENCES users(username)"
+        ")"
+    )
+
+    # --- Minimal migration support (if a previous table existed without password) ---
+    try:
+        cur.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "password" not in cols:
+            cur.execute("ALTER TABLE users ADD COLUMN password TEXT")
+            cur.execute("UPDATE users SET password='' WHERE password IS NULL")
+            conn.commit()
+    except Exception:
+        # If migration fails, we still keep going; this is best-effort.
+        pass
+
     conn.commit()
     conn.close()
-    print(f"[{SERVER_NAME}] Database initialized.")
+    print(f"[{SERVER_NAME}] Database initialized at '{DB_FILE}'.")
 
-def execute_sql_command(sql_command: str) -> str:
-    """מבצע פקודות INSERT/UPDATE/DELETE"""
+
+def _success(rows=None) -> str:
+    if rows is None:
+        return "SUCCESS"
+    if not rows:
+        return "SUCCESS"
+    parts = ["SUCCESS"]
+    for r in rows:
+        parts.append(",".join("" if v is None else str(v) for v in r))
+    return "|".join(parts)
+
+
+def _error(msg: str) -> str:
+    return f"ERROR|{msg}"
+
+
+def execute_sql(sql: str) -> str:
     try:
         conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(sql_command)
+        cur = conn.cursor()
+
+        sql_stripped = sql.strip()
+        is_select = sql_stripped.upper().startswith("SELECT")
+
+        cur.execute(sql)
+
+        if is_select:
+            rows = cur.fetchall()
+            conn.close()
+            return _success(rows)
+
         conn.commit()
         conn.close()
-        return "done"
-    except Exception as e:
-        return f"Error: {str(e)}"
+        return _success()
 
-def execute_sql_query(sql_query: str) -> str:
-    """מבצע שאילתות SELECT ומחזיר את התוצאות כמחרוזת"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        rows = cursor.fetchall()
-        conn.close()
-        
-      
-        return "|".join([",".join(map(str, row)) for row in rows]) if rows else "empty"
     except Exception as e:
-        return f"Error: {str(e)}"
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return _error(str(e))
+
 
 def handle_client(client_socket: socket.socket, addr):
     print(f"[{SERVER_NAME}] Client connected from {addr}")
     try:
         while True:
             message = recv_null_terminated(client_socket)
-            if not message: break
+            if not message:
+                break
 
             print(f"[{SERVER_NAME}] Received SQL: {message}")
-            
-            if message.strip().upper().startswith("SELECT"):
-                response = execute_sql_query(message)
-            else:
-                response = execute_sql_command(message)
-
+            response = execute_sql(message)
             client_socket.sendall((response + "\0").encode("utf-8"))
 
     except Exception as e:
         print(f"[{SERVER_NAME}] Error: {e}")
     finally:
-        client_socket.close()
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
 
 def start_server(host="127.0.0.1", port=7778):
+    init_database()
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
