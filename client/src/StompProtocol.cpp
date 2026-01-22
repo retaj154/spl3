@@ -22,18 +22,15 @@ bool StompProtocol::eventLess(const Event &a, const Event &b) {
     int pa = halftimePhase(a);
     int pb = halftimePhase(b);
 
-    // If we can distinguish halves, order by half first.
     if (pa != 2 || pb != 2) {
-        if (pa == 2) pa = 1; // unknown -> treat as after halftime
+        if (pa == 2) pa = 1;
         if (pb == 2) pb = 1;
         if (pa != pb) return pa < pb;
     }
 
-    // Then by time.
     if (a.get_time() != b.get_time())
         return a.get_time() < b.get_time();
 
-    // Stable tie-breaker (shouldn't matter per assumptions)
     return a.get_name() < b.get_name();
 }
 
@@ -49,7 +46,6 @@ bool StompProtocol::startsWith(const string &s, const string &prefix) {
 }
 
 bool StompProtocol::parseKeyValue(const string &line, string &key, string &val) {
-    // Accept both "k:v" and "k : v" and allow leading spaces.
     string t = trim(line);
     if (t.empty()) return false;
     size_t pos = t.find(':');
@@ -103,7 +99,6 @@ string StompProtocol::processInput(const string &line, const string &username) {
     }
 
     if (command == "add") {
-        // add {game_name} {book_name}
         string game;
         ss >> game;
         string book;
@@ -130,20 +125,17 @@ string StompProtocol::processInput(const string &line, const string &username) {
 }
 
 string StompProtocol::createReportFrame(const Event &event, const string &username, const string &fileNameHeader) {
-    // SEND headers
     string destination = "/" + event.get_team_a_name() + "_" + event.get_team_b_name();
 
     string frame = "SEND\n";
     frame += "destination:" + destination + "\n";
 
-    // Optional header used only for server-side file tracking (Stage 3.3)
     if (!fileNameHeader.empty()) {
         frame += "file:" + fileNameHeader + "\n";
     }
 
     frame += "\n";
 
-    // Body formatted like the assignment's example (human-readable "key : value" lines)
     frame += "user : " + username + "\n";
     frame += "team a : " + event.get_team_a_name() + "\n";
     frame += "team b : " + event.get_team_b_name() + "\n";
@@ -172,7 +164,6 @@ string StompProtocol::createReportFrame(const Event &event, const string &userna
 }
 
 void StompProtocol::processMessage(const string &frame) {
-    // Extract destination header
     string gameName;
     {
         istringstream iss(frame);
@@ -189,7 +180,6 @@ void StompProtocol::processMessage(const string &frame) {
     }
     if (gameName.empty()) return;
 
-    // Extract body (after empty line)
     size_t sep = frame.find("\n\n");
     if (sep == string::npos) return;
     string body = frame.substr(sep + 2);
@@ -228,15 +218,13 @@ void StompProtocol::processMessage(const string &frame) {
         }
         if (t.rfind("description", 0) == 0) {
             section = DESC;
-            // description itself continues on following lines
             continue;
         }
 
         string key, val;
         if (section == DESC) {
-            // Multi-line description: keep as-is with newlines
             if (!description.empty()) description += "\n";
-            description += line; // keep original spacing
+            description += line;
             continue;
         }
 
@@ -260,7 +248,6 @@ void StompProtocol::processMessage(const string &frame) {
     Event ev(teamA, teamB, eventName, time, gameUpdates, teamAUpdates, teamBUpdates, description);
     game_reports[gameName][user].push_back(ev);
 
-    // Keep events ordered (handle halftime edge-case)
     auto &vec = game_reports[gameName][user];
     sort(vec.begin(), vec.end(), eventLess);
 }
@@ -282,7 +269,6 @@ void StompProtocol::saveSummary(const string &gameName, const string &user, cons
     const vector<Event> &events = userIt->second;
     if (events.empty()) return;
 
-    // Accumulate latest updates
     map<string, string> generalStats;
     map<string, string> aStats;
     map<string, string> bStats;

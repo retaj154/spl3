@@ -19,11 +19,9 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
 
     private static final AtomicInteger messageIdCounter = new AtomicInteger(0);
 
-    // Active users only (login/password lives in SQL)
     private static final ConcurrentHashMap<String, User> activeByName = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Integer, User> activeByConn = new ConcurrentHashMap<>();
 
-    // Best-effort de-dup for file tracking
     private static final ConcurrentHashMap<String, Boolean> fileUploadOnce = new ConcurrentHashMap<>();
 
     private final Database db = Database.getInstance();
@@ -120,10 +118,8 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
             return;
         }
 
-        // Load password from DB (null means user does not exist)
         String storedPassword = db.getPassword(login);
         if (storedPassword == null) {
-            // New user: register in DB
             boolean ok = db.registerUser(login, passcode);
             if (!ok) {
                 sendError("SQL registration failed", "SQL registration failed", receipt);
@@ -224,13 +220,11 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
             return;
         }
 
-        // Per assignment: if not subscribed -> ERROR + disconnect
         if (currentUser.getSubscriptionId(topic) == null) {
             sendError("Not subscribed to topic", "Not subscribed to topic", receipt);
             return;
         }
 
-        // File tracking (best-effort): client may include a "file" header in the SEND frame.
         String filename = headers.get("file");
         if (filename != null && !filename.isEmpty()) {
             String key = currentUser.name + "|" + filename + "|" + topic;
@@ -272,7 +266,6 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
             connections.send(connectionId, createReceiptFrame(receipt));
         }
 
-        // Graceful disconnect
         cleanupAndDisconnect(false);
     }
 
@@ -282,12 +275,10 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     }
 
     private void cleanupAndDisconnect(boolean dueToError) {
-        // Log logout only if the user was logged-in
         if (currentUser != null && currentUser.isLoggedIn()) {
             db.logLogout(currentUser.name);
         }
 
-        // Unsubscribe all + remove from active maps
         if (connections instanceof ConnectionsImpl) {
             ((ConnectionsImpl<String>) connections).unsubscribeAll(connectionId);
         }

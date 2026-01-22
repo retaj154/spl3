@@ -37,7 +37,6 @@ public class StompServer {
         int port = Integer.parseInt(args[0]);
         String serverType = args[1];
 
-        // Optional: type "report" in the server console to print the SQL-based report
         startAdminConsole(Database.getInstance());
 
         if (serverType.equals("tpc")) {

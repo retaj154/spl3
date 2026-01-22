@@ -38,7 +38,6 @@ public class Reactor<T> implements Server<T> {
         this.port = port;
         this.protocolFactory = protocolFactory;
         this.readerFactory = readerFactory;
-        // אתחול Connections משותף
         this.connections = new ConnectionsImpl<>();
     }
 
@@ -48,7 +47,7 @@ public class Reactor<T> implements Server<T> {
         try (Selector selector = Selector.open();
              ServerSocketChannel serverSock = ServerSocketChannel.open()) {
 
-            this.selector = selector; //just to be able to close
+            this.selector = selector; 
 
             serverSock.bind(new InetSocketAddress(port));
             serverSock.configureBlocking(false);

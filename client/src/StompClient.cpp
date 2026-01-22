@@ -13,7 +13,6 @@ using namespace std;
 static bool extractHeaderValue(const string &frame, const string &headerKey, string &outValue) {
     istringstream iss(frame);
     string line;
-    // skip command line
     if (!getline(iss, line)) return false;
     while (getline(iss, line)) {
         if (line == "\r") line = "";

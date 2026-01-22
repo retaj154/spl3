@@ -10,9 +10,7 @@ public class User {
     private volatile int connectionId;
     private volatile boolean isLoggedIn = false;
 
-    // topic -> subscription-id
     private final Map<String, String> topicToSubId = new ConcurrentHashMap<>();
-    // subscription-id -> topic
     private final Map<String, String> subIdToTopic = new ConcurrentHashMap<>();
 
     public User(int connectionId, String name, String password) {

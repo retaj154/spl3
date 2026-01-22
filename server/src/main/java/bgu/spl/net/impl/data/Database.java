@@ -10,18 +10,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Tiny helper for the assignment's Python SQL server.
- *
- * Protocol (matches sql_server.py):
- * - send SQL string terminated with '\0'
- * - receive response terminated with '\0'
- *
- * Response format:
- * - SUCCESS
- * - SUCCESS|row1|row2|...   (SELECT)
- * - ERROR|<message>
- */
 public class Database {
 
     private static class Instance {
@@ -88,7 +76,6 @@ public class Database {
         return rows;
     }
 
-    /** Returns null if user does not exist (or DB error). */
     public String getPassword(String username) {
         String sql = "SELECT password FROM users WHERE username='" + esc(username) + "'";
         String resp = executeSQL(sql);
@@ -97,20 +84,17 @@ public class Database {
         return rows.get(0).length > 0 ? rows.get(0)[0] : null;
     }
 
-    /** Insert a new user. Returns true on success, false on error. */
     public boolean registerUser(String username, String password) {
         String sql = "INSERT INTO users(username,password) VALUES('" + esc(username) + "','" + esc(password) + "')";
         String resp = executeSQL(sql);
         return isSuccess(resp);
     }
 
-    /** Insert a login session row (logout_time starts NULL). */
     public void logLogin(String username) {
         String sql = "INSERT INTO sessions(username,login_time,logout_time) VALUES('" + esc(username) + "','" + esc(now()) + "',NULL)";
         executeSQL(sql);
     }
 
-    /** Update latest session with NULL logout_time for this user. */
     public void logLogout(String username) {
         String ts = esc(now());
         String u = esc(username);
@@ -124,11 +108,9 @@ public class Database {
         executeSQL(sql);
     }
 
-    /** Server-side report (must be based only on SQL query results). */
     public void printReport() {
         System.out.println("\n========== SERVER SQL REPORT (" + LocalDateTime.now() + ") ==========");
 
-        // 1) Users
         System.out.println("\n1) Registered users:");
         List<String[]> users = parseRows(executeSQL("SELECT username FROM users ORDER BY username"));
         if (users.isEmpty()) {
@@ -140,7 +122,6 @@ public class Database {
             System.out.println("   - " + r[0]);
         }
 
-        // 2) Sessions per user
         System.out.println("\n2) Login history:");
         for (String[] u : users) {
             String user = u[0];
@@ -158,7 +139,6 @@ public class Database {
             }
         }
 
-        // 3) File uploads per user
         System.out.println("\n3) Filenames uploaded via report:");
         for (String[] u : users) {
             String user = u[0];

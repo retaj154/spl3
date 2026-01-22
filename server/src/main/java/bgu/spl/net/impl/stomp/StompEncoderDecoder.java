@@ -1,4 +1,3 @@
-// File: bgu/spl/net/impl/stomp/StompEncoderDecoder.java
 package bgu.spl.net.impl.stomp;
 
 import bgu.spl.net.api.MessageEncoderDecoder;
