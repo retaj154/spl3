@@ -105,12 +105,12 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         String passcode = headers.get("passcode");
 
         if (login == null || passcode == null) {
-            sendError("Malformed Frame", "Missing login/passcode", receipt);
+            sendError("Missing login/passcode", "Missing login/passcode", receipt);
             return;
         }
 
         if (isLoggedIn()) {
-            sendError("Permission denied", "Client already logged in", receipt);
+            sendError("Not logged in", "Client already logged in", receipt);
             return;
         }
 
@@ -126,7 +126,7 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
             // New user: register in DB
             boolean ok = db.registerUser(login, passcode);
             if (!ok) {
-                sendError("Server error", "SQL registration failed", receipt);
+                sendError("SQL registration failed", "SQL registration failed", receipt);
                 return;
             }
         } else {
@@ -152,19 +152,19 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     private void handleSubscribe(Map<String, String> headers) {
         String receipt = headers.get("receipt");
         if (!isLoggedIn()) {
-            sendError("Permission denied", "Not logged in", receipt);
+            sendError("Not logged in", "Not logged in", receipt);
             return;
         }
 
         String topic = headers.get("destination");
         String subId = headers.get("id");
         if (topic == null || subId == null) {
-            sendError("Malformed Frame", "Missing destination/id", receipt);
+            sendError("Missing destination/id", "Missing destination/id", receipt);
             return;
         }
 
         if (!(connections instanceof ConnectionsImpl)) {
-            sendError("Server error", "Connections implementation mismatch", receipt);
+            sendError("Connections implementation mismatch", "Connections implementation mismatch", receipt);
             return;
         }
 
@@ -180,26 +180,26 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     private void handleUnsubscribe(Map<String, String> headers) {
         String receipt = headers.get("receipt");
         if (!isLoggedIn()) {
-            sendError("Permission denied", "Not logged in", receipt);
+            sendError("Not logged in", "Not logged in", receipt);
             return;
         }
 
         String subId = headers.get("id");
         if (subId == null) {
-            sendError("Malformed Frame", "Missing id", receipt);
+            sendError("Missing id", "Missing id", receipt);
             return;
         }
 
         String topic = currentUser.getTopic(subId);
         if (topic == null) {
-            sendError("Permission denied", "Not subscribed", receipt);
+            sendError("Not subscribed", "Not subscribed", receipt);
             return;
         }
 
         currentUser.removeSubscription(subId);
 
         if (!(connections instanceof ConnectionsImpl)) {
-            sendError("Server error", "Connections implementation mismatch", receipt);
+            sendError("Connections implementation mismatch", "Connections implementation mismatch", receipt);
             return;
         }
 
@@ -214,19 +214,19 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
     private void handleSend(Map<String, String> headers, String body) {
         String receipt = headers.get("receipt");
         if (!isLoggedIn()) {
-            sendError("Permission denied", "Not logged in", receipt);
+            sendError("Not logged in", "Not logged in", receipt);
             return;
         }
 
         String topic = headers.get("destination");
         if (topic == null) {
-            sendError("Malformed Frame", "Missing destination", receipt);
+            sendError("Missing destination", "Missing destination", receipt);
             return;
         }
 
         // Per assignment: if not subscribed -> ERROR + disconnect
         if (currentUser.getSubscriptionId(topic) == null) {
-            sendError("Permission denied", "Not subscribed to topic", receipt);
+            sendError("Not subscribed to topic", "Not subscribed to topic", receipt);
             return;
         }
 
@@ -240,7 +240,7 @@ public class StompMessagingProtocolImpl implements StompMessagingProtocol<String
         }
 
         if (!(connections instanceof ConnectionsImpl)) {
-            sendError("Server error", "Connections implementation mismatch", receipt);
+            sendError("Connections implementation mismatch", "Connections implementation mismatch", receipt);
             return;
         }
 
